@@ -1,0 +1,467 @@
+import pygame
+import random
+import sys
+import os
+import math
+
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except Exception:
+    HAS_NUMPY = False
+
+WIDTH, HEIGHT = 800, 600
+FPS = 60
+PLAYER_SIZE = 48
+PLAYER_SPEED = 5
+COIN_SIZE = 18
+ENEMY_SIZE = 44
+ENEMY_BASE_SPEED = 1.6
+SPAWN_COIN_EVERY = 100  
+MAX_PHASE = 10
+INITIAL_LIVES = 3
+ASSETS_DIR = os.path.join(os.path.dirname(__file__), 'assets')
+HIGHSCORE_FILE = 'highscore.txt'
+
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+GREEN = (0, 200, 0)
+YELLOW = (255, 215, 0)
+RED = (200, 40, 40)
+BLUE = (50, 120, 255)
+DARK = (24, 28, 40)
+
+
+def clamp(n, a, b):
+    return max(a, min(b, n))
+
+
+def load_image(name, fallback_draw=None):
+    path = os.path.join(ASSETS_DIR, name)
+    if os.path.isfile(path):
+        try:
+            img = pygame.image.load(path).convert_alpha()
+            return img
+        except Exception as e:
+            print(f"Erro ao carregar imagem {path}:", e)
+    return None
+
+
+def draw_text(surf, text, size, x, y, color=WHITE, center=False, bold=False):
+    font = pygame.font.SysFont(None, size, bold=bold)
+    txt = font.render(text, True, color)
+    rect = txt.get_rect()
+    if center:
+        rect.center = (x, y)
+    else:
+        rect.topleft = (x, y)
+    surf.blit(txt, rect)
+
+
+
+def make_tone(freq=440.0, duration_ms=120, volume=0.2, sample_rate=44100):
+    
+    if not HAS_NUMPY:
+        return None
+    n_samples = int(sample_rate * (duration_ms / 1000.0))
+    t = np.linspace(0, duration_ms / 1000.0, n_samples, False)
+    wave = 0.5 * np.sin(2 * np.pi * freq * t)
+    
+    envelope = np.linspace(1.0, 0.3, n_samples)
+    wave = wave * envelope
+    audio = np.int16(wave * volume * 32767)
+    snd = pygame.sndarray.make_sound(audio)
+    return snd
+
+
+
+class Particle:
+    def __init__(self, x, y):
+        angle = random.random() * math.tau
+        speed = random.uniform(1.5, 4.5)
+        self.vx = math.cos(angle) * speed
+        self.vy = math.sin(angle) * speed
+        self.x = x
+        self.y = y
+        self.life = random.randint(20, 50)
+        self.size = random.randint(2, 5)
+        self.color = (255, random.randint(180, 255), 50)
+
+    def update(self):
+        self.x += self.vx
+        self.y += self.vy
+        self.vx *= 0.98
+        self.vy *= 0.98
+        self.life -= 1
+
+    def draw(self, surf):
+        if self.life > 0:
+            a = max(10, int(255 * (self.life / 50)))
+            s = pygame.Surface((self.size*2, self.size*2), pygame.SRCALPHA)
+            pygame.draw.circle(s, (*self.color, a), (self.size, self.size), self.size)
+            surf.blit(s, (int(self.x), int(self.y)))
+
+
+class Player:
+    def __init__(self, x, y, img=None):
+        self.rect = pygame.Rect(x, y, PLAYER_SIZE, PLAYER_SIZE)
+        self.color = BLUE
+        self.speed = PLAYER_SPEED
+        self.img = img
+
+    def handle_input(self, keys):
+        dx = dy = 0
+        if keys[pygame.K_LEFT] or keys[pygame.K_a]:
+            dx -= self.speed
+        if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
+            dx += self.speed
+        if keys[pygame.K_UP] or keys[pygame.K_w]:
+            dy -= self.speed
+        if keys[pygame.K_DOWN] or keys[pygame.K_s]:
+            dy += self.speed
+
+        self.rect.x += dx
+        self.rect.y += dy
+        self.rect.x = clamp(self.rect.x, 0, WIDTH - self.rect.width)
+        self.rect.y = clamp(self.rect.y, 0, HEIGHT - self.rect.height)
+
+    def draw(self, surf):
+        if self.img:
+            surf.blit(pygame.transform.scale(self.img, (self.rect.width, self.rect.height)), self.rect.topleft)
+        else:
+            pygame.draw.rect(surf, self.color, self.rect, border_radius=8)
+            
+            eye_w = 8
+            eye_h = 8
+            ex = self.rect.x + 10
+            ey = self.rect.y + 10
+            pygame.draw.rect(surf, WHITE, (ex, ey, eye_w, eye_h))
+            pygame.draw.rect(surf, WHITE, (ex + 22, ey, eye_w, eye_h))
+
+
+class Coin:
+    def __init__(self, x, y, img=None):
+        self.rect = pygame.Rect(x, y, COIN_SIZE, COIN_SIZE)
+        self.offset = random.random() * 2 * math.pi
+        self.img = img
+
+    def draw(self, surf, t):
+        
+        pulse = 2 * (1 + 0.35 * math.sin(self.offset + t * 0.02))
+        cx = self.rect.centerx
+        cy = self.rect.centery
+        if self.img:
+            surf.blit(pygame.transform.scale(self.img, (self.rect.width, self.rect.height)), (self.rect.x, self.rect.y))
+        else:
+            pygame.draw.circle(surf, YELLOW, (cx, cy), COIN_SIZE // 2 + int(pulse))
+            pygame.draw.circle(surf, (255, 240, 180), (cx, cy), COIN_SIZE // 2 - 4)
+
+
+class Enemy:
+    def __init__(self, x, y, speed=ENEMY_BASE_SPEED, img=None):
+        self.rect = pygame.Rect(x, y, ENEMY_SIZE, ENEMY_SIZE)
+        angle = random.random() * 2 * math.pi
+        self.vx = math.cos(angle) * speed
+        self.vy = math.sin(angle) * speed
+        self.color = RED
+        self.img = img
+
+    def update(self):
+        self.rect.x += int(self.vx)
+        self.rect.y += int(self.vy)
+        if self.rect.left <= 0 or self.rect.right >= WIDTH:
+            self.vx = -self.vx
+        if self.rect.top <= 0 or self.rect.bottom >= HEIGHT:
+            self.vy = -self.vy
+
+    def draw(self, surf):
+        if self.img:
+            surf.blit(pygame.transform.scale(self.img, (self.rect.width, self.rect.height)), (self.rect.x, self.rect.y))
+        else:
+            pygame.draw.rect(surf, self.color, self.rect, border_radius=6)
+            mx = self.rect.centerx
+            my = self.rect.centery
+            pygame.draw.line(surf, BLACK, (mx - 12, my), (mx + 12, my), 3)
+
+
+
+
+def load_assets():
+    assets = {}
+    assets['player_img'] = load_image('player.png')
+    assets['coin_img'] = load_image('coin.png')
+    assets['enemy_img'] = load_image('enemy.png')
+    
+    assets['coin_snd'] = None
+    assets['hit_snd'] = None
+    assets['music'] = None
+
+    
+    coin_path = os.path.join(ASSETS_DIR, 'coin.wav')
+    hit_path = os.path.join(ASSETS_DIR, 'hit.wav')
+    music_path = os.path.join(ASSETS_DIR, 'bg_music.ogg')
+
+    try:
+        if os.path.isfile(coin_path):
+            assets['coin_snd'] = pygame.mixer.Sound(coin_path)
+        if os.path.isfile(hit_path):
+            assets['hit_snd'] = pygame.mixer.Sound(hit_path)
+        if os.path.isfile(music_path):
+            assets['music'] = music_path
+    except Exception as e:
+        print('Erro ao carregar audio:', e)
+
+    
+    if assets['coin_snd'] is None and HAS_NUMPY:
+        assets['coin_snd'] = make_tone(900, 120, 0.12)
+    if assets['hit_snd'] is None and HAS_NUMPY:
+        assets['hit_snd'] = make_tone(120, 250, 0.3)
+
+    return assets
+
+
+def read_highscore():
+    try:
+        with open(HIGHSCORE_FILE, 'r') as f:
+            return int(f.read().strip())
+    except Exception:
+        return 0
+
+
+def write_highscore(score):
+    try:
+        with open(HIGHSCORE_FILE, 'w') as f:
+            f.write(str(score))
+    except Exception:
+        pass
+
+
+def main():
+    pygame.init()
+    pygame.mixer.init()
+    screen = pygame.display.set_mode((WIDTH, HEIGHT))
+    pygame.display.set_caption('Coletar Moedas - Versão Avançada')
+    clock = pygame.time.Clock()
+
+    assets = load_assets()
+
+    score = 0
+    frame = 0
+    running = True
+    game_over = False
+    paused = False
+    phase = 1
+    lives = INITIAL_LIVES
+
+    
+    highscore = read_highscore()
+
+    
+    player = Player(WIDTH // 2 - PLAYER_SIZE // 2, HEIGHT - PLAYER_SIZE - 30, img=assets['player_img'])
+    coins = []
+    enemies = []
+    particles = []
+
+    def spawn_coin():
+        x = random.randint(10, WIDTH - COIN_SIZE - 10)
+        y = random.randint(10, HEIGHT - COIN_SIZE - 10)
+        return Coin(x, y, img=assets['coin_img'])
+
+    def spawn_enemy(phase):
+        speed = ENEMY_BASE_SPEED + 0.2 * phase
+        x = random.randint(0, WIDTH - ENEMY_SIZE)
+        y = random.randint(0, HEIGHT - ENEMY_SIZE)
+        return Enemy(x, y, speed=speed, img=assets['enemy_img'])
+
+   
+    for _ in range(6):
+        coins.append(spawn_coin())
+    for _ in range(1):
+        enemies.append(spawn_enemy(phase))
+
+    
+    if assets.get('music'):
+        try:
+            pygame.mixer.music.load(assets['music'])
+            pygame.mixer.music.play(-1)
+        except Exception as e:
+            print('Erro ao reproduzir música:', e)
+
+    
+    menu = True
+    show_instructions = False
+
+    while running:
+        dt = clock.tick(FPS)
+        frame += 1
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    if menu:
+                        running = False
+                    else:
+                        menu = True
+                if event.key == pygame.K_p and not menu:
+                    paused = not paused
+                if event.key == pygame.K_r and (game_over or menu):
+                    
+                    return main()
+                if event.key == pygame.K_RETURN and menu and not show_instructions:
+                    
+                    menu = False
+                    game_over = False
+                    score = 0
+                    phase = 1
+                    lives = INITIAL_LIVES
+                    coins = [spawn_coin() for _ in range(5 + phase)]
+                    enemies = [spawn_enemy(phase) for _ in range(1 + phase//2)]
+                if event.key == pygame.K_i and menu:
+                    show_instructions = not show_instructions
+
+            if event.type == pygame.MOUSEBUTTONDOWN and not menu and not paused and not game_over:
+                mx, my = event.pos
+                coins.append(Coin(mx - COIN_SIZE // 2, my - COIN_SIZE // 2, img=assets['coin_img']))
+
+        keys = pygame.key.get_pressed()
+        if menu:
+            
+            screen.fill(DARK)
+            draw_text(screen, 'COLETAR MOEDAS - VERSÃO AVANÇADA', 36, WIDTH//2, 80, WHITE, center=True, bold=True)
+            draw_text(screen, 'Pressione ENTER para jogar', 24, WIDTH//2, 160, WHITE, center=True)
+            draw_text(screen, 'Pressione I para instruções', 20, WIDTH//2, 200, WHITE, center=True)
+            draw_text(screen, 'Pressione ESC para sair', 20, WIDTH//2, 230, WHITE, center=True)
+            draw_text(screen, f'Highscore: {highscore}', 22, WIDTH//2, HEIGHT - 60, YELLOW, center=True)
+
+            if show_instructions:
+                
+                lines = [
+                    'Instruções:',
+                    '- Movimente com setas ou W/A/S/D',
+                    '- Clique para criar uma moeda',
+                    '- P pausa, R reinicia quando terminar',
+                    '- Colete moedas para ganhar pontos',
+                    '- Evite inimigos; perder vidas ao colidir',
+                    '- A cada fase o jogo fica mais difícil'
+                ]
+                y0 = 280
+                for i, l in enumerate(lines):
+                    draw_text(screen, l, 18, WIDTH//2, y0 + i*26, WHITE, center=True)
+
+            pygame.display.flip()
+            continue
+
+        if not paused and not game_over:
+            player.handle_input(keys)
+
+            
+            for e in enemies:
+                e.update()
+
+            
+            for c in coins[:]:
+                if player.rect.colliderect(c.rect):
+                    coins.remove(c)
+                    score += 1
+                   
+                    for _ in range(12):
+                        particles.append(Particle(c.rect.centerx, c.rect.centery))
+                    
+                    if assets.get('coin_snd'):
+                        try:
+                            assets['coin_snd'].play()
+                        except Exception:
+                            pass
+
+            
+            for e in enemies[:]:
+                if player.rect.colliderect(e.rect):
+                    lives -= 1
+                    # hit sound
+                    if assets.get('hit_snd'):
+                        try:
+                            assets['hit_snd'].play()
+                        except Exception:
+                            pass
+                    
+                    player.rect.x = WIDTH // 2 - PLAYER_SIZE // 2
+                    player.rect.y = HEIGHT - PLAYER_SIZE - 30
+                   
+                    try:
+                        e.rect.x = random.randint(0, WIDTH - ENEMY_SIZE)
+                        e.rect.y = random.randint(0, HEIGHT - ENEMY_SIZE)
+                    except Exception:
+                        pass
+                    if lives <= 0:
+                        game_over = True
+
+            
+            if frame % max(20, SPAWN_COIN_EVERY - phase*6) == 0:
+                coins.append(spawn_coin())
+
+           
+            new_phase = min(MAX_PHASE, 1 + score // 10)
+            if new_phase != phase:
+                phase = new_phase
+              
+                enemies.append(spawn_enemy(phase))
+              
+                for _ in range(3 + phase):
+                    coins.append(spawn_coin())
+
+           
+            for p in particles[:]:
+                p.update()
+                if p.life <= 0:
+                    particles.remove(p)
+
+       
+        screen.fill((16, 20, 35))
+
+        
+        for gx in range(0, WIDTH, 80):
+            pygame.draw.line(screen, (20, 26, 45), (gx, 0), (gx, HEIGHT))
+        for gy in range(0, HEIGHT, 80):
+            pygame.draw.line(screen, (20, 26, 45), (0, gy), (WIDTH, gy))
+
+        t = pygame.time.get_ticks()
+        for c in coins:
+            c.draw(screen, t)
+
+        player.draw(screen)
+
+        for e in enemies:
+            e.draw(screen)
+
+        for p in particles:
+            p.draw(screen)
+
+     
+        draw_text(screen, f'Pontos: {score}', 26, 12, 8, WHITE)
+        draw_text(screen, f'Fase: {phase}', 22, 12, 36, WHITE)
+        draw_text(screen, f'Vidas: {lives}', 22, 12, 60, WHITE)
+        draw_text(screen, f'Highscore: {highscore}', 20, WIDTH - 200, 10, YELLOW)
+        draw_text(screen, 'P: Pausa | Clique: cria moeda | R: Reiniciar', 16, WIDTH//2, HEIGHT - 22, WHITE, center=True)
+
+        if paused:
+            draw_text(screen, 'PAUSADO', 64, WIDTH//2, HEIGHT//2, WHITE, center=True, bold=True)
+
+        if game_over:
+            draw_text(screen, 'GAME OVER', 64, WIDTH//2, HEIGHT//2 - 50, RED, center=True, bold=True)
+            draw_text(screen, f'Pontos: {score}', 36, WIDTH//2, HEIGHT//2 + 10, WHITE, center=True)
+            draw_text(screen, 'Pressione R para reiniciar ou ESC para voltar ao menu', 18, WIDTH//2, HEIGHT//2 + 60, WHITE, center=True)
+            
+            if score > highscore:
+                highscore = score
+                write_highscore(highscore)
+
+        pygame.display.flip()
+
+    pygame.quit()
+    sys.exit()
+
+
+if __name__ == '__main__':
+    main()
